@@ -36,6 +36,7 @@ WALK_SPEED   = 1.5
 FRAME_MS     = 50            # 20 fps
 SCALE        = 2
 SHINY_CHANCE = 100           # 1-in-N
+SIZE_OPTIONS = [50, 75, 100, 150, 200, 300]   # % relative to default (100 = SCALE×2)
 
 GEN5_URL  = ("https://raw.githubusercontent.com/PokeAPI/sprites/master"
              "/sprites/pokemon/versions/generation-v/black-white/animated/{}.gif")
@@ -131,9 +132,9 @@ def load_frames(path: str, scale: int = SCALE):
         fr   = frame.convert("RGBA")
         base.paste(fr, mask=fr.split()[3])
         img  = base.convert("RGB")
-        if scale != 1:
-            img = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
-        return img
+        new_w = max(1, round(img.width  * scale))
+        new_h = max(1, round(img.height * scale))
+        return img.resize((new_w, new_h), Image.NEAREST)
 
     try:
         while True:
@@ -612,6 +613,7 @@ class Buddy:
         self.line_idx  = 0
         self.evo_stage = 0
         self.is_shiny  = False
+        self.size_pct  = 100   # 100 = default (SCALE×2)
 
         # Download sprites (skipped if already cached)
         print("BuddyMon — Checking sprites...", flush=True)
@@ -627,16 +629,21 @@ class Buddy:
         self.scr_w = self.root.winfo_screenwidth()
         self.scr_h = self.root.winfo_screenheight()
 
-        # Load all sprites (ImageTk requires root to exist)
+        # Load all sprites at default scale (ImageTk requires root to exist)
         self._cache: dict = {}
         for pid in ALL_IDS:
             for shiny in (False, True):
                 p = sprite_path(pid, shiny)
                 if os.path.exists(p):
-                    self._cache[(pid, shiny)] = load_frames(p)
+                    self._cache[(pid, shiny, SCALE)] = load_frames(p, scale=SCALE)
+
+        # Build a default-scale view for the selection screen
+        _select_cache = {(pid, shiny): v
+                         for (pid, shiny, sc), v in self._cache.items()
+                         if sc == SCALE}
 
         # Show starter selection
-        select = StarterSelect(self.root, self._cache, STARTER_LINES, self._on_chosen)
+        select = StarterSelect(self.root, _select_cache, STARTER_LINES, self._on_chosen)
         self.root.wait_window(select.win)
 
         if not getattr(self, "_started", False):
@@ -684,14 +691,23 @@ class Buddy:
 
     # ── Sprite management ─────────────────────────────────────────────────────
     def _apply(self):
-        """Apply current line/stage/shiny to the sprite."""
-        evo = STARTER_LINES[self.line_idx]["evolutions"][self.evo_stage]
-        pid = evo["id"]
+        """Apply current line/stage/shiny/size to the sprite."""
+        evo   = STARTER_LINES[self.line_idx]["evolutions"][self.evo_stage]
+        pid   = evo["id"]
+        scale = round(self.size_pct / 100 * SCALE, 4)
+        key   = (pid, self.is_shiny, scale)
 
-        if (pid, self.is_shiny) not in self._cache:
+        if (pid, self.is_shiny, SCALE) not in self._cache:
             self.is_shiny = False   # fallback if shiny sprite missing
 
-        r, l, w, h = self._cache[(pid, self.is_shiny)]
+        if key not in self._cache:
+            p = sprite_path(pid, self.is_shiny)
+            if os.path.exists(p):
+                self._cache[key] = load_frames(p, scale=scale)
+            else:
+                key = (pid, self.is_shiny, SCALE)  # fallback to default size
+
+        r, l, w, h = self._cache[key]
         self.frames_r, self.frames_l = r, l
         self.sw, self.sh = w, h
         self.ground_y = float(self.scr_h - TASKBAR_H - self.sh)
@@ -752,6 +768,12 @@ class Buddy:
         self.frame_i  = 0
         self._apply()
 
+    def _change_size(self, pct: int):
+        self.size_pct = pct
+        self.frame_i  = 0
+        self._apply()
+        self._build_menu()
+
     # ── Right-click menu ──────────────────────────────────────────────────────
     def _build_menu(self):
         line = STARTER_LINES[self.line_idx]
@@ -795,6 +817,16 @@ class Buddy:
                 command=lambda idx=i: self._change_line(idx),
             )
         m.add_cascade(label="Change Starter", menu=sub_s)
+
+        # Size
+        sub_z = tk.Menu(m, tearoff=0, font=("Segoe UI", 9))
+        for pct in SIZE_OPTIONS:
+            mark = "●  " if pct == self.size_pct else "    "
+            sub_z.add_command(
+                label=f"{mark}{pct}%",
+                command=lambda p=pct: self._change_size(p),
+            )
+        m.add_cascade(label="Change Size", menu=sub_z)
 
         m.add_separator()
         m.add_command(label="Reroll Shiny", command=self._reroll_shiny)
