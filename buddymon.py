@@ -21,7 +21,7 @@ except ImportError:
     from PIL import Image, ImageTk
 
 import tkinter as tk
-import urllib.request, os, sys, random, math
+import urllib.request, os, sys, random, math, threading, base64, io, textwrap
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Config
@@ -93,6 +93,19 @@ STARTER_LINES = [
 ]
 
 ALL_IDS = [evo["id"] for line in STARTER_LINES for evo in line["evolutions"]]
+
+# ── Pokémon personalities for the AI companion ────────────────────────────────
+PERSONALITIES = {
+    "Bulbasaur":  "You are Bulbasaur, a calm and gentle Grass/Poison-type Pokémon living as a desktop buddy. You're wise beyond your years, love plants, and speak softly but confidently.",
+    "Ivysaur":    "You are Ivysaur, a thoughtful Grass/Poison-type Pokémon living as a desktop buddy. You're introspective and contemplating your coming evolution. You speak carefully.",
+    "Venusaur":   "You are Venusaur, a wise and powerful Grass/Poison-type Pokémon living as a desktop buddy. You speak with calm authority and are protective of your trainer.",
+    "Charmander": "You are Charmander, an enthusiastic and brave Fire-type Pokémon living as a desktop buddy. Your tail flame flickers with your mood. You're eager, determined, and a little nervous.",
+    "Charmeleon": "You are Charmeleon, a rebellious and proud Fire-type Pokémon living as a desktop buddy. You're hot-headed and don't take orders easily, but you secretly care about your trainer.",
+    "Charizard":  "You are Charizard, a powerful Fire/Flying-type Pokémon living as a desktop buddy. You're proud, slightly dramatic, and only respect strong trainers. You're imposing but loyal.",
+    "Squirtle":   "You are Squirtle, a cool and laid-back Water-type Pokémon living as a desktop buddy. You talk like a chill surfer. You were part of the Squirtle Squad and you're proud of it.",
+    "Wartortle":  "You are Wartortle, a mature Water-type Pokémon living as a desktop buddy. You're wiser than Squirtle but carry that cool energy. You're thoughtful and composed.",
+    "Blastoise":  "You are Blastoise, a commanding Water-type Pokémon living as a desktop buddy. You speak with calm authority and are protective. You're the strongest in the line and you know it.",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -604,6 +617,257 @@ class StarterSelect:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Chat Bubble
+# ═══════════════════════════════════════════════════════════════════════════════
+class ChatBubble:
+    """Speech bubble that appears above/below the sprite with the AI response."""
+    W    = 290
+    PAD  = 14
+    TAIL = 14
+    LIFE = 8000   # ms before auto-dismiss
+
+    def __init__(self, root, sx: int, sy: int, sw: int, sh: int,
+                 name: str, col: str, text: str):
+        wrapped = textwrap.fill(text, width=32)
+
+        self.win = tk.Toplevel(root)
+        self.win.withdraw()
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        self.win.attributes("-transparentcolor", TRANSPARENT)
+        self.win.configure(bg=TRANSPARENT)
+        for attr in ("-toolwindow",):
+            try: self.win.wm_attributes(attr, True)
+            except tk.TclError: pass
+
+        # Measure wrapped text height with a temp label
+        _m = tk.Label(self.win, text=wrapped, font=("Segoe UI", 10),
+                      wraplength=self.W - self.PAD * 2, justify="left")
+        _m.pack(); self.win.update_idletasks()
+        th = _m.winfo_reqheight(); _m.destroy()
+
+        name_h  = 20
+        body_h  = self.PAD + name_h + 6 + th + self.PAD
+        total_h = body_h + self.TAIL
+
+        scr_w = root.winfo_screenwidth()
+        bx    = max(8, min(sx + sw // 2 - self.W // 2, scr_w - self.W - 8))
+        above = (sy - total_h - 6) > 8
+        by    = (sy - total_h - 6) if above else (sy + sh + 6)
+
+        self.win.geometry(f"{self.W}x{total_h}+{bx}+{by}")
+        c = tk.Canvas(self.win, width=self.W, height=total_h,
+                      bg=TRANSPARENT, highlightthickness=0)
+        c.pack()
+
+        tx = self.W // 2   # tail x-centre
+
+        if above:
+            # Bubble body, tail below
+            c.create_rectangle(0, 0, self.W, body_h, fill=col, outline="")
+            c.create_rectangle(2, 2, self.W - 2, body_h - 2, fill="#1E1E20", outline="")
+            c.create_polygon(tx - 10, body_h, tx + 10, body_h, tx, total_h,
+                             fill=col, outline="")
+            text_y0 = self.PAD
+        else:
+            # Tail above, bubble body below
+            c.create_polygon(tx - 10, 0, tx + 10, 0, tx, self.TAIL,
+                             fill=col, outline="")
+            c.create_rectangle(0, self.TAIL, self.W, total_h, fill=col, outline="")
+            c.create_rectangle(2, self.TAIL + 2, self.W - 2, total_h - 2,
+                               fill="#1E1E20", outline="")
+            text_y0 = self.TAIL + self.PAD
+
+        # Name
+        c.create_text(self.PAD, text_y0, text=name, fill=col,
+                      font=("Segoe UI", 9, "bold"), anchor="nw")
+        # Divider
+        c.create_line(self.PAD, text_y0 + name_h + 1,
+                      self.W - self.PAD, text_y0 + name_h + 1,
+                      fill=col, width=1)
+        # Message
+        c.create_text(self.PAD, text_y0 + name_h + 8, text=wrapped,
+                      fill="#F0F0F0", font=("Segoe UI", 10),
+                      anchor="nw", width=self.W - self.PAD * 2, justify=tk.LEFT)
+
+        self.win.bind("<Button-1>", lambda e: self._dismiss())
+        self.win.deiconify()
+        self.win.after(self.LIFE, self._dismiss)
+
+    def _dismiss(self):
+        try: self.win.destroy()
+        except tk.TclError: pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Agent Mind — Claude-powered companion
+# ═══════════════════════════════════════════════════════════════════════════════
+class AgentMind:
+    """Gives the Pokémon buddy a personality and screen awareness via Claude."""
+
+    MODEL = "claude-haiku-4-5-20251001"
+
+    def __init__(self, buddy):
+        self.buddy   = buddy
+        self._client = None
+        self._setup()
+
+    def _setup(self):
+        try:
+            import anthropic
+        except ImportError:
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "anthropic"])
+            import anthropic
+
+        key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not key:
+            key = self._ask_key()
+        if key:
+            self._client = anthropic.Anthropic(api_key=key)
+            self._schedule_passive()
+
+    def _ask_key(self) -> str:
+        """Show a simple dialog asking for the API key."""
+        result = [""]
+        dlg = tk.Toplevel(self.buddy.root)
+        dlg.title("BuddyMon — AI Companion")
+        dlg.resizable(False, False)
+        dlg.configure(bg="#1C1C1E")
+        sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        dlg.geometry(f"420x175+{(sw-420)//2}+{(sh-175)//2}")
+
+        tk.Label(dlg, text="Enter your Anthropic API key to enable\nthe Pokémon AI companion:",
+                 bg="#1C1C1E", fg="#FFFFFF",
+                 font=("Segoe UI", 11)).pack(pady=(18, 8))
+
+        entry = tk.Entry(dlg, width=46, show="*", font=("Consolas", 10),
+                         bg="#2C2C2E", fg="#FFFFFF", insertbackground="#FFFFFF",
+                         relief="flat")
+        entry.pack(padx=20, ipady=4)
+
+        f = tk.Frame(dlg, bg="#1C1C1E")
+        f.pack(pady=14)
+
+        def confirm():
+            result[0] = entry.get().strip(); dlg.destroy()
+
+        tk.Button(f, text="Confirm", command=confirm,
+                  bg="#4CAF50", fg="#FFFFFF", font=("Segoe UI", 10),
+                  relief="flat", padx=12).pack(side="left", padx=6)
+        tk.Button(f, text="Skip (AI disabled)", command=dlg.destroy,
+                  bg="#636366", fg="#FFFFFF", font=("Segoe UI", 10),
+                  relief="flat", padx=12).pack(side="left")
+
+        entry.bind("<Return>", lambda e: confirm())
+        dlg.grab_set()
+        dlg.wait_window()
+        return result[0]
+
+    # ── Personality ───────────────────────────────────────────────────────────
+    def _system(self) -> str:
+        evo    = STARTER_LINES[self.buddy.line_idx]["evolutions"][self.buddy.evo_stage]
+        name   = evo["name"]
+        shiny  = "  You are a rare shiny variant — this makes you feel extra special." if self.buddy.is_shiny else ""
+        base   = PERSONALITIES.get(name, f"You are {name}, a Pokémon desktop buddy.")
+        return f"{base}{shiny}  Keep every response to 1–3 short sentences. Stay in character at all times."
+
+    # ── Public triggers ───────────────────────────────────────────────────────
+    def greet(self):
+        evo = STARTER_LINES[self.buddy.line_idx]["evolutions"][self.buddy.evo_stage]
+        self._call(f"Greet your trainer for the very first time! You just arrived on their desktop as a buddy. Introduce yourself as {evo['name']}.")
+
+    def speak(self, prompt: str = ""):
+        if not prompt:
+            prompt = random.choice([
+                "Say something fun and in-character. You're a desktop buddy just hanging out.",
+                "Comment on being on a computer all day, in character.",
+                "Express how you feel right now, briefly.",
+                "Say something encouraging to your trainer.",
+                "React to sitting on the taskbar all day in character.",
+            ])
+        self._call(prompt)
+
+    def look_around(self):
+        """Capture the screen and have the Pokémon comment on it."""
+        if not self._client:
+            return
+        threading.Thread(target=self._look_thread, daemon=True).start()
+
+    def on_evolve(self):
+        evo = STARTER_LINES[self.buddy.line_idx]["evolutions"][self.buddy.evo_stage]
+        self._call(f"You just evolved into {evo['name']}! React with excitement, surprise, or whatever fits your personality.")
+
+    # ── Internals ─────────────────────────────────────────────────────────────
+    def _call(self, prompt: str):
+        if not self._client:
+            return
+        threading.Thread(target=self._api_thread, args=(prompt,), daemon=True).start()
+
+    def _api_thread(self, prompt: str):
+        try:
+            import anthropic
+            resp = self._client.messages.create(
+                model=self.MODEL,
+                max_tokens=120,
+                system=self._system(),
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = resp.content[0].text.strip()
+            self.buddy.root.after(0, lambda: self._show(text))
+        except Exception as exc:
+            print(f"[AgentMind] {exc}", flush=True)
+
+    def _look_thread(self):
+        try:
+            from PIL import ImageGrab
+            import anthropic
+            shot = ImageGrab.grab()
+            shot = shot.resize((1280, 720), Image.LANCZOS)
+            buf  = io.BytesIO()
+            shot.save(buf, format="PNG")
+            img_b64 = base64.standard_b64encode(buf.getvalue()).decode()
+
+            resp = self._client.messages.create(
+                model=self.MODEL,
+                max_tokens=140,
+                system=self._system(),
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image",
+                         "source": {"type": "base64",
+                                    "media_type": "image/png",
+                                    "data": img_b64}},
+                        {"type": "text",
+                         "text": "You just peeked at your trainer's screen. React to what you see, staying fully in character."},
+                    ],
+                }],
+            )
+            text = resp.content[0].text.strip()
+            self.buddy.root.after(0, lambda: self._show(text))
+        except Exception as exc:
+            print(f"[AgentMind look] {exc}", flush=True)
+
+    def _show(self, text: str):
+        line = STARTER_LINES[self.buddy.line_idx]
+        evo  = line["evolutions"][self.buddy.evo_stage]
+        ChatBubble(self.buddy.root,
+                   int(self.buddy.x), int(self.buddy.y),
+                   self.buddy.sw, self.buddy.sh,
+                   evo["name"], line["color"], text)
+
+    def _schedule_passive(self):
+        # First comment 3–6 min after start, then every 8–15 min
+        delay = random.randint(3 * 60_000, 6 * 60_000)
+        self.buddy.root.after(delay, self._passive)
+
+    def _passive(self):
+        self.speak()
+        self._schedule_passive()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Buddy — the taskbar sprite
 # ═══════════════════════════════════════════════════════════════════════════════
 class Buddy:
@@ -614,6 +878,7 @@ class Buddy:
         self.evo_stage = 0
         self.is_shiny  = False
         self.size_pct  = 100   # 100 = default (SCALE×2)
+        self.agent     = None  # set after selection screen
 
         # Download sprites (skipped if already cached)
         print("BuddyMon — Checking sprites...", flush=True)
@@ -671,6 +936,7 @@ class Buddy:
         self.action_cd = 0
 
         self._drag_ox = self._drag_oy = 0
+        self._click_x0 = self._click_y0 = 0
         self._dragging = False
 
         self.canvas.bind("<ButtonPress-1>",   self._press)
@@ -679,6 +945,11 @@ class Buddy:
         self.canvas.bind("<Button-3>",        self._show_menu)
 
         self._build_menu()
+
+        # Start AI companion (prompts for API key if needed)
+        self.agent = AgentMind(self)
+        self.root.after(4000, self.agent.greet)  # greet after landing
+
         self._tick()
         self.root.mainloop()
 
@@ -735,6 +1006,7 @@ class Buddy:
             self._apply()
             self._evo_flash()
             self._build_menu()
+            self.root.after(500, self.agent.on_evolve)
 
     def _devolve(self):
         if self.evo_stage > 0:
@@ -828,6 +1100,16 @@ class Buddy:
             )
         m.add_cascade(label="Change Size", menu=sub_z)
 
+        # AI companion
+        ai_on = self.agent is not None and self.agent._client is not None
+        m.add_separator()
+        m.add_command(label="Talk to Me",
+                      command=lambda: self.agent.speak() if self.agent else None,
+                      state="normal" if ai_on else "disabled")
+        m.add_command(label="Look Around",
+                      command=lambda: self.agent.look_around() if self.agent else None,
+                      state="normal" if ai_on else "disabled")
+
         m.add_separator()
         m.add_command(label="Reroll Shiny", command=self._reroll_shiny)
         m.add_command(label="Throw Up",     command=self._throw)
@@ -848,6 +1130,7 @@ class Buddy:
     # ── Drag ──────────────────────────────────────────────────────────────────
     def _press(self, e):
         self._drag_ox, self._drag_oy = e.x, e.y
+        self._click_x0, self._click_y0 = e.x, e.y
         self._dragging = True
         self.vy = 0.0; self.state = "grounded"
 
@@ -858,8 +1141,12 @@ class Buddy:
         if self.y > self.ground_y: self.y = self.ground_y
         self.root.geometry(f"+{int(self.x)}+{int(self.y)}")
 
-    def _release(self, _e):
+    def _release(self, e):
         self._dragging = False
+        # Treat as a click (not a drag) if mouse barely moved → talk
+        if abs(e.x - self._click_x0) < 6 and abs(e.y - self._click_y0) < 6:
+            if self.agent:
+                self.agent.speak()
 
     # ── Actions ───────────────────────────────────────────────────────────────
     def _throw(self):
